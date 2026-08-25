@@ -104,19 +104,30 @@ def get_tasks_by_date(task_date):
     return response.data or []
 
 
-def get_tasks_between_dates(
-    start_date,
-    end_date
-):
+def get_tasks_between_dates(start_date, end_date):
+    """
+    Get pending tasks that are relevant between start_date
+    and end_date.
+
+    A task is considered relevant if:
+
+    1. Its task_date falls within the period, OR
+    2. Its deadline falls within the period, OR
+    3. It started before the period but is still pending and
+       has a deadline after the start date.
+    """
 
     response = (
         supabase
         .table("tasks")
         .select("*")
-        .gte("task_date", start_date)
-        .lte("task_date", end_date)
-        .order("task_date")
-        .order("id")
+        .eq("status", "Pending")
+        .or_(
+            f"and(task_date.gte.{start_date},task_date.lte.{end_date}),"
+            f"and(deadline.gte.{start_date},deadline.lte.{end_date}),"
+            f"and(task_date.lt.{start_date},deadline.gte.{start_date})"
+        )
+        .order("deadline", desc=False)
         .execute()
     )
 
