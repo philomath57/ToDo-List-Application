@@ -4,10 +4,9 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 
 
-
-
 # ============================================================
 # PAGE CONFIGURATION
+# MUST BE THE FIRST STREAMLIT COMMAND
 # ============================================================
 
 st.set_page_config(
@@ -17,23 +16,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
 from database import (
     add_task,
     delete_task,
     get_all_tasks,
     get_monthly_tasks,
     get_statistics,
-    get_tasks_between_dates,
     get_tasks_by_date,
     toggle_task_status,
     update_task,
 )
+
 
 # ============================================================
 # AUTHENTICATION
 # ============================================================
 
 def check_password():
+    """Simple password protection using Streamlit secrets."""
 
     if st.session_state.get("authenticated", False):
         return True
@@ -52,7 +53,7 @@ def check_password():
             </p>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     password = st.text_input(
@@ -66,14 +67,18 @@ def check_password():
         type="primary",
         use_container_width=True,
     ):
+        try:
+            correct_password = st.secrets["APP_PASSWORD"]
+        except Exception:
+            st.error(
+                "APP_PASSWORD is not configured in Streamlit Secrets."
+            )
+            return False
 
-        if password == st.secrets["APP_PASSWORD"]:
-
+        if password == correct_password:
             st.session_state.authenticated = True
             st.rerun()
-
         else:
-
             st.error("Incorrect password.")
 
     return False
@@ -91,14 +96,12 @@ st.markdown(
     """
     <style>
 
-    /* Main container */
     .block-container {
         padding-top: 2rem;
         padding-bottom: 3rem;
         max-width: 1400px;
     }
 
-    /* Application title */
     .app-title {
         font-size: 2rem;
         font-weight: 700;
@@ -111,31 +114,17 @@ st.markdown(
         margin-bottom: 1.5rem;
     }
 
-    /* Task title */
-    .task-title {
-        font-size: 1.05rem;
-        font-weight: 600;
-    }
-
-    /* Secondary text */
     .muted {
         color: #6b7280;
         font-size: 0.85rem;
     }
 
-    /* Metric cards */
     div[data-testid="stMetric"] {
         background: rgba(128, 128, 128, 0.06);
         padding: 14px;
         border-radius: 12px;
     }
 
-    /* Reduce excessive vertical spacing */
-    div[data-testid="stVerticalBlock"] > div {
-        gap: 0.5rem;
-    }
-
-    /* Sidebar */
     section[data-testid="stSidebar"] {
         padding-top: 1rem;
     }
@@ -147,11 +136,35 @@ st.markdown(
 
 
 # ============================================================
+# CONSTANTS
+# ============================================================
+
+CATEGORIES = [
+    "Dissertation",
+    "Assignment",
+    "Data Analysis",
+    "Programming",
+    "Machine Learning",
+    "Research",
+    "Report",
+    "Presentation",
+    "Other",
+]
+
+PRIORITIES = [
+    "Low",
+    "Medium",
+    "High",
+    "Urgent",
+]
+
+
+# ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 
 def money(value):
-    """Format a numeric value as GBP."""
+    """Format a numeric value as INR."""
 
     try:
         return f"₹{float(value or 0):,.2f}"
@@ -169,7 +182,6 @@ def number(value):
 
 
 def priority_icon(priority):
-
     return {
         "Urgent": "🔴",
         "High": "🟠",
@@ -178,62 +190,578 @@ def priority_icon(priority):
     }.get(priority, "⚪")
 
 
-def format_date(value):
+def safe_text(value):
+    if value is None:
+        return ""
+    return str(value)
 
-    if not value:
-        return "—"
 
+def to_date(value):
+    """
+    Convert common database date representations to datetime.date.
+    Returns None when conversion is not possible.
+    """
+
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    text = str(value).strip()
+
+    # ISO datetime
     try:
-
-        if isinstance(value, date):
-            return value.strftime("%d %b %Y")
-
-        return datetime.strptime(
-            str(value),
-            "%Y-%m-%d"
-        ).strftime("%d %b %Y")
-
+        return datetime.fromisoformat(text).date()
     except Exception:
+        pass
 
-        return str(value)
+    # Common date formats
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            continue
+
+    return None
+
+
+def format_date(value):
+    parsed = to_date(value)
+
+    if parsed:
+        return parsed.strftime("%d %b %Y")
+
+    return "—" if not value else str(value)
 
 
 def is_overdue(task):
+    """Return True when a pending task's deadline has passed."""
 
-    if task.get("status") == "Completed":
+    if safe_text(task.get("status")) == "Completed":
         return False
 
-    deadline = task.get("deadline")
+    deadline = to_date(task.get("deadline"))
 
     if not deadline:
         return False
 
-    try:
+    return deadline < date.today()
 
-        if isinstance(deadline, date):
 
-            deadline_date = deadline
+# ============================================================
+# IMPORTANT DATE LOGIC
+# ============================================================
 
-        else:
+def is_task_active_on_date(task, selected_date):
+    """
+    Decide whether a task should be considered active on a particular date.
 
-            deadline_date = datetime.strptime(
-                str(deadline),
-                "%Y-%m-%d"
-            ).date()
+    BUSINESS RULE:
 
-        return deadline_date < date.today()
+    1. A task starts being active on its Task Date.
+    2. If a Deadline exists, it remains active through the Deadline,
+       including the deadline date.
+    3. If no Deadline exists, it remains active only on its Task Date.
+    4. Completed tasks are excluded from pending/current views.
 
-    except Exception:
+    Example:
+        Task Date = 24 Aug
+        Deadline  = 25 Aug
 
+        24 Aug -> visible
+        25 Aug -> visible
+        26 Aug -> not visible
+
+    This is the main fix for the disappearing-task problem.
+    """
+
+    if safe_text(task.get("status")) == "Completed":
         return False
 
+    task_date = to_date(task.get("task_date"))
+    deadline = to_date(task.get("deadline"))
 
-def safe_text(value):
+    if not task_date:
+        return False
 
-    if value is None:
-        return ""
+    # A task cannot become active before its scheduled task date.
+    if selected_date < task_date:
+        return False
 
-    return str(value)
+    # No deadline = active only on its scheduled date.
+    if not deadline:
+        return selected_date == task_date
+
+    # Deadline is inclusive.
+    return selected_date <= deadline
+
+
+def get_active_tasks_for_date(selected_date, include_completed=False):
+    """
+    Return tasks that are active on selected_date.
+
+    This function deliberately reads all stored tasks and applies the
+    business rule in Python. It avoids depending on a database query
+    that only looks at task_date.
+    """
+
+    tasks = get_all_tasks()
+    result = []
+
+    for task in tasks:
+
+        if not include_completed:
+            if safe_text(task.get("status")) == "Completed":
+                continue
+
+        task_date = to_date(task.get("task_date"))
+        deadline = to_date(task.get("deadline"))
+
+        if not task_date:
+            continue
+
+        if include_completed:
+            if task_date <= selected_date:
+                if deadline:
+                    if selected_date <= deadline:
+                        result.append(task)
+                elif selected_date == task_date:
+                    result.append(task)
+            continue
+
+        if is_task_active_on_date(task, selected_date):
+            result.append(task)
+
+    return result
+
+
+def get_pending_dashboard_tasks(start_date, end_date):
+    """
+    Return pending tasks that need attention between start_date and end_date.
+
+    IMPORTANT:
+    A task is included when its active period overlaps the dashboard
+    window.
+
+    Examples:
+
+        Task Date 24 Aug, Deadline 25 Aug
+            -> appears on 24 Aug and 25 Aug.
+
+        Task Date 26 Aug, Deadline 27 Aug
+            -> appears in the upcoming section on 26/27 Aug.
+
+        Task Date 24 Aug, no deadline
+            -> appears only on 24 Aug.
+
+    Overdue tasks whose deadline is already before start_date are not
+    included here because the dashboard's upcoming section is intended
+    for the current date and future workload.
+    """
+
+    all_tasks = get_all_tasks()
+    result = []
+
+    for task in all_tasks:
+
+        if safe_text(task.get("status")) == "Completed":
+            continue
+
+        task_date = to_date(task.get("task_date"))
+        deadline = to_date(task.get("deadline"))
+
+        if not task_date:
+            continue
+
+        # A task with no deadline exists only on its task date.
+        if not deadline:
+
+            if start_date <= task_date <= end_date:
+                result.append(task)
+
+            continue
+
+        # Task's active interval:
+        # task_date ---------------- deadline
+        #
+        # Dashboard window:
+        # start_date ---------------- end_date
+        #
+        # Intervals overlap when:
+        # task_date <= end_date AND deadline >= start_date
+
+        if task_date <= end_date and deadline >= start_date:
+            result.append(task)
+
+    # Sort by deadline first, then task date, then priority.
+    priority_order = {
+        "Urgent": 0,
+        "High": 1,
+        "Medium": 2,
+        "Low": 3,
+    }
+
+    result.sort(
+        key=lambda task: (
+            to_date(task.get("deadline")) or date.max,
+            to_date(task.get("task_date")) or date.max,
+            priority_order.get(
+                safe_text(task.get("priority")),
+                9,
+            ),
+            safe_text(task.get("title")).lower(),
+        )
+    )
+
+    return result
+
+
+def render_task_card(task, key_prefix="task"):
+    """
+    Reusable task card used by Home and Tasks pages.
+    """
+
+    current_status = (
+        safe_text(task.get("status")) == "Completed"
+    )
+
+    with st.container(border=True):
+
+        col1, col2 = st.columns([0.06, 0.94])
+
+        checked = col1.checkbox(
+            "",
+            value=current_status,
+            key=f"{key_prefix}_status_{task['id']}",
+        )
+
+        if checked != current_status:
+
+            toggle_task_status(
+                task["id"],
+                checked,
+            )
+
+            st.rerun()
+
+        title = safe_text(task.get("title")) or "Untitled Task"
+
+        title_display = (
+            f"~~{title}~~"
+            if current_status
+            else title
+        )
+
+        col2.markdown(
+            f"### {priority_icon(task.get('priority'))} "
+            f"{title_display}"
+        )
+
+        client = safe_text(task.get("client_name"))
+
+        if client:
+            col2.caption(
+                f"👤 Client: **{client}**"
+            )
+
+        meta1, meta2, meta3, meta4 = col2.columns(4)
+
+        meta1.caption(
+            f"📅 {format_date(task.get('task_date'))}"
+        )
+
+        meta2.caption(
+            f"📝 {number(task.get('total_words'))} words"
+        )
+
+        meta3.caption(
+            f"💻 {safe_text(task.get('software')) or '—'}"
+        )
+
+        meta4.caption(
+            f"💰 {money(task.get('price'))}"
+        )
+
+        deadline = to_date(task.get("deadline"))
+
+        if deadline:
+
+            if (
+                not current_status
+                and deadline < date.today()
+            ):
+                col2.error(
+                    f"⚠️ OVERDUE · {format_date(deadline)}"
+                )
+
+            elif deadline == date.today():
+
+                col2.warning(
+                    "⚠️ DEADLINE TODAY"
+                )
+
+            elif deadline == date.today() + timedelta(days=1):
+
+                col2.caption(
+                    f"🟠 Deadline tomorrow · "
+                    f"{format_date(deadline)}"
+                )
+
+            else:
+
+                col2.caption(
+                    f"Deadline · {format_date(deadline)}"
+                )
+
+        if task.get("category"):
+
+            col2.caption(
+                f"📂 {safe_text(task.get('category'))}"
+            )
+
+        if task.get("description"):
+            col2.write(
+                safe_text(task.get("description"))
+            )
+
+        if task.get("notes"):
+
+            with col2.expander("📝 Notes"):
+
+                col2.write(
+                    safe_text(task.get("notes"))
+                )
+
+
+def render_edit_delete(task):
+    """
+    Render the edit/delete section for a task.
+    """
+
+    task_id = task["id"]
+    current_status = (
+        safe_text(task.get("status")) == "Completed"
+    )
+
+    with st.expander("⚙️ Edit / Delete"):
+
+        edited_title = st.text_input(
+            "Task Title",
+            value=safe_text(task.get("title")),
+            key=f"edit_title_{task_id}",
+        )
+
+        edited_client = st.text_input(
+            "Client Name",
+            value=safe_text(task.get("client_name")),
+            key=f"edit_client_{task_id}",
+        )
+
+        e1, e2 = st.columns(2)
+
+        with e1:
+
+            original_task_date = (
+                to_date(task.get("task_date"))
+                or date.today()
+            )
+
+            edited_date = st.date_input(
+                "Task Date",
+                value=original_task_date,
+                key=f"edit_date_{task_id}",
+            )
+
+            original_deadline = to_date(
+                task.get("deadline")
+            )
+
+            edited_deadline = st.date_input(
+                "Deadline",
+                value=original_deadline,
+                key=f"edit_deadline_{task_id}",
+            )
+
+            edited_status = st.selectbox(
+                "Status",
+                ["Pending", "Completed"],
+                index=1 if current_status else 0,
+                key=f"edit_status_{task_id}",
+            )
+
+        with e2:
+
+            original_category = safe_text(
+                task.get("category")
+            ) or "Other"
+
+            if original_category not in CATEGORIES:
+                original_category = "Other"
+
+            edited_category = st.selectbox(
+                "Category",
+                CATEGORIES,
+                index=CATEGORIES.index(original_category),
+                key=f"edit_category_{task_id}",
+            )
+
+            original_priority = safe_text(
+                task.get("priority")
+            ) or "Medium"
+
+            if original_priority not in PRIORITIES:
+                original_priority = "Medium"
+
+            edited_priority = st.selectbox(
+                "Priority",
+                PRIORITIES,
+                index=PRIORITIES.index(original_priority),
+                key=f"edit_priority_{task_id}",
+            )
+
+            edited_words = st.number_input(
+                "Total Words",
+                min_value=0,
+                value=int(task.get("total_words") or 0),
+                step=100,
+                key=f"edit_words_{task_id}",
+            )
+
+            edited_price = st.number_input(
+                "Price (₹)",
+                min_value=0.0,
+                value=float(task.get("price") or 0),
+                step=5.0,
+                key=f"edit_price_{task_id}",
+            )
+
+        edited_software = st.text_input(
+            "Software / Work Details",
+            value=safe_text(task.get("software")),
+            key=f"edit_software_{task_id}",
+        )
+
+        edited_description = st.text_area(
+            "Description",
+            value=safe_text(task.get("description")),
+            key=f"edit_description_{task_id}",
+        )
+
+        edited_notes = st.text_area(
+            "Notes",
+            value=safe_text(task.get("notes")),
+            key=f"edit_notes_{task_id}",
+        )
+
+        b1, b2 = st.columns(2)
+
+        with b1:
+
+            if st.button(
+                "💾 Save Changes",
+                key=f"save_{task_id}",
+                type="primary",
+                use_container_width=True,
+            ):
+
+                if not edited_title.strip():
+
+                    st.error(
+                        "Task title cannot be empty."
+                    )
+
+                else:
+
+                    update_task(
+                        task_id=task_id,
+                        title=edited_title.strip(),
+                        client_name=edited_client.strip(),
+                        task_date=edited_date.isoformat(),
+                        deadline=(
+                            edited_deadline.isoformat()
+                            if edited_deadline
+                            else None
+                        ),
+                        description=edited_description.strip(),
+                        status=edited_status,
+                        total_words=int(edited_words),
+                        software=edited_software.strip(),
+                        category=edited_category,
+                        priority=edited_priority,
+                        price=float(edited_price),
+                        notes=edited_notes.strip(),
+                    )
+
+                    st.success(
+                        "Task updated successfully."
+                    )
+
+                    st.rerun()
+
+        with b2:
+
+            if st.button(
+                "🗑️ Delete Task",
+                key=f"delete_{task_id}",
+                use_container_width=True,
+            ):
+
+                st.session_state[
+                    f"confirm_delete_{task_id}"
+                ] = True
+
+        if st.session_state.get(
+            f"confirm_delete_{task_id}",
+            False,
+        ):
+
+            st.warning(
+                "Are you sure you want to delete this task?"
+            )
+
+            d1, d2 = st.columns(2)
+
+            with d1:
+
+                if st.button(
+                    "Yes, delete",
+                    key=f"confirm_{task_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+
+                    delete_task(task_id)
+
+                    st.session_state[
+                        f"confirm_delete_{task_id}"
+                    ] = False
+
+                    st.success("Task deleted.")
+
+                    st.rerun()
+
+            with d2:
+
+                if st.button(
+                    "Cancel",
+                    key=f"cancel_{task_id}",
+                    use_container_width=True,
+                ):
+
+                    st.session_state[
+                        f"confirm_delete_{task_id}"
+                    ] = False
+
+                    st.rerun()
 
 
 # ============================================================
@@ -269,14 +797,12 @@ with st.sidebar:
         "🔄 Refresh",
         use_container_width=True,
     ):
-
         st.rerun()
 
     if st.button(
         "🔒 Lock",
         use_container_width=True,
     ):
-
         st.session_state.authenticated = False
         st.rerun()
 
@@ -300,14 +826,10 @@ if page == "🏠 Home":
 
     st.markdown(
         '<div class="app-subtitle">'
-        'A quick overview of your work, tasks and earnings.'
-        '</div>',
+        "A quick overview of your work, tasks and earnings."
+        "</div>",
         unsafe_allow_html=True,
     )
-
-    # --------------------------------------------------------
-    # GLOBAL STATISTICS
-    # --------------------------------------------------------
 
     stats = get_statistics()
 
@@ -370,238 +892,21 @@ if page == "🏠 Home":
     st.divider()
 
     # --------------------------------------------------------
-    # TODAY'S TASKS
+    # TODAY'S ACTIVE TASKS
     # --------------------------------------------------------
-
-    st.subheader(
-        f"Today's Tasks · {date.today().strftime('%d %B %Y')}"
-    )
 
     today = date.today()
 
-st.subheader(
-    f"Today's Tasks · {today.strftime('%d %B %Y')}"
-)
-
-all_tasks = get_all_tasks()
-
-active_today_tasks = []
-
-for task in all_tasks:
-
-    # Completed tasks should not appear in the
-    # pending/current task section.
-    if task.get("status") == "Completed":
-        continue
-
-    task_date_value = task.get("task_date")
-    deadline_value = task.get("deadline")
-
-    try:
-        task_date_obj = (
-            datetime.strptime(
-                str(task_date_value),
-                "%Y-%m-%d"
-            ).date()
-            if task_date_value
-            else None
-        )
-    except Exception:
-        task_date_obj = None
-
-    try:
-        deadline_obj = (
-            datetime.strptime(
-                str(deadline_value),
-                "%Y-%m-%d"
-            ).date()
-            if deadline_value
-            else None
-        )
-    except Exception:
-        deadline_obj = None
-
-    show_task = False
-
-    # ----------------------------------------------------
-    # Task scheduled for today
-    # ----------------------------------------------------
-
-    if task_date_obj == today:
-        show_task = True
-
-    # ----------------------------------------------------
-    # Task was scheduled earlier but is still within
-    # its deadline
-    # ----------------------------------------------------
-
-    elif (
-        task_date_obj
-        and task_date_obj < today
-        and deadline_obj
-        and deadline_obj >= today
-    ):
-        show_task = True
-
-    # ----------------------------------------------------
-    # Task deadline is today
-    # ----------------------------------------------------
-
-    elif deadline_obj == today:
-        show_task = True
-
-    if show_task:
-        active_today_tasks.append(task)
-
-
-if not active_today_tasks:
-
-    st.info(
-        "No pending tasks for today."
+    st.subheader(
+        f"Today's Tasks · {today.strftime('%d %B %Y')}"
     )
 
-    if st.button(
-        "➕ Add a task for today",
-        type="primary",
-    ):
-
-        st.info(
-            "Use the 'Add Task' section from the sidebar."
-        )
-
-else:
-
-    completed_count = sum(
-        task.get("status") == "Completed"
-        for task in active_today_tasks
-    )
-
-    pending_count = (
-        len(active_today_tasks)
-        - completed_count
-    )
-
-    st.caption(
-        f"{len(active_today_tasks)} active task(s)"
-    )
-
-    for task in active_today_tasks:
-
-        current_status = (
-            task["status"] == "Completed"
-        )
-
-        with st.container(border=True):
-
-            col1, col2 = st.columns(
-                [0.06, 0.94]
-            )
-
-            checked = col1.checkbox(
-                "",
-                value=current_status,
-                key=f"home_status_{task['id']}",
-            )
-
-            if checked != current_status:
-
-                toggle_task_status(
-                    task["id"],
-                    checked,
-                )
-
-                st.rerun()
-
-            title = safe_text(
-                task.get("title")
-            )
-
-            client = safe_text(
-                task.get("client_name")
-            )
-
-            if current_status:
-                title_display = f"~~{title}~~"
-            else:
-                title_display = title
-
-            col2.markdown(
-                f"**{priority_icon(task.get('priority'))} "
-                f"{title_display}**"
-            )
-
-            if client:
-
-                col2.caption(
-                    f"👤 {client}"
-                )
-
-            # ------------------------------------------------
-            # Deadline indicator
-            # ------------------------------------------------
-
-            deadline_value = task.get("deadline")
-
-            if deadline_value:
-
-                try:
-
-                    deadline_date = datetime.strptime(
-                        str(deadline_value),
-                        "%Y-%m-%d"
-                    ).date()
-
-                    if deadline_date < today:
-
-                        col2.error(
-                            f"⚠️ OVERDUE · "
-                            f"{format_date(deadline_value)}"
-                        )
-
-                    elif deadline_date == today:
-
-                        col2.warning(
-                            "⚠️ DEADLINE TODAY"
-                        )
-
-                    else:
-
-                        col2.caption(
-                            f"Deadline · "
-                            f"{format_date(deadline_value)}"
-                        )
-
-                except Exception:
-                    pass
-
-            meta1, meta2, meta3, meta4 = col2.columns(4)
-
-            meta1.caption(
-                f"📝 {number(task.get('total_words'))} words"
-            )
-
-            meta2.caption(
-                f"💻 {safe_text(task.get('software')) or '—'}"
-            )
-
-            meta3.caption(
-                f"💰 {money(task.get('price'))}"
-            )
-
-            meta4.caption(
-                f"📂 {safe_text(task.get('category')) or 'Other'}"
-            )
-
-            if task.get("description"):
-
-                col2.write(
-                    task["description"]
-                )
+    today_tasks = get_active_tasks_for_date(today)
 
     if not today_tasks:
 
         st.info(
-            "No tasks scheduled for today."
+            "No pending tasks for today."
         )
 
         if st.button(
@@ -615,224 +920,33 @@ else:
 
     else:
 
-        today_completed = sum(
-            task["status"] == "Completed"
-            for task in today_tasks
-        )
-
-        today_pending = (
-            len(today_tasks) - today_completed
-        )
-
         st.caption(
-            f"{today_pending} pending · "
-            f"{today_completed} completed"
+            f"{len(today_tasks)} active pending task(s)"
         )
 
         for task in today_tasks:
 
-            current_status = (
-                task["status"] == "Completed"
+            render_task_card(
+                task,
+                key_prefix="home",
             )
-
-            with st.container(border=True):
-
-                col1, col2 = st.columns(
-                    [0.06, 0.94]
-                )
-
-                checked = col1.checkbox(
-                    "",
-                    value=current_status,
-                    key=f"home_status_{task['id']}",
-                )
-
-                if checked != current_status:
-
-                    toggle_task_status(
-                        task["id"],
-                        checked,
-                    )
-
-                    st.rerun()
-
-                title = safe_text(
-                    task.get("title")
-                )
-
-                client = safe_text(
-                    task.get("client_name")
-                )
-
-                if current_status:
-                    title_display = f"~~{title}~~"
-                else:
-                    title_display = title
-
-                col2.markdown(
-                    f"**{priority_icon(task.get('priority'))} "
-                    f"{title_display}**"
-                )
-
-                if client:
-
-                    col2.caption(
-                        f"👤 {client}"
-                    )
-
-                meta1, meta2, meta3, meta4 = col2.columns(4)
-
-                meta1.caption(
-                    f"📝 {number(task.get('total_words'))} words"
-                )
-
-                meta2.caption(
-                    f"💻 {safe_text(task.get('software')) or '—'}"
-                )
-
-                meta3.caption(
-                    f"💰 {money(task.get('price'))}"
-                )
-
-                meta4.caption(
-                    f"📂 {safe_text(task.get('category')) or 'Other'}"
-                )
 
     st.divider()
 
     # --------------------------------------------------------
-    # UPCOMING TASKS
+    # UPCOMING / OUTSTANDING TASKS
     # --------------------------------------------------------
 
-    st.subheader("Upcoming Tasks")
-
-    # --------------------------------------------------------
-# UPCOMING / OUTSTANDING TASKS
-# --------------------------------------------------------
-
-st.subheader(
-    "Upcoming & Outstanding Tasks"
-)
-
-today = date.today()
-
-upcoming_end = (
-    today
-    + timedelta(days=7)
-)
-
-upcoming = get_pending_dashboard_tasks(
-    start_date=today,
-    end_date=upcoming_end,
-)
-
-if not upcoming:
-
-    st.success(
-        "No pending tasks in the next 7 days."
+    st.subheader(
+        "Upcoming & Outstanding Tasks"
     )
 
-else:
+    upcoming_end = today + timedelta(days=7)
 
-    st.caption(
-        f"{len(upcoming)} pending task(s) "
-        f"requiring attention."
+    upcoming = get_pending_dashboard_tasks(
+        start_date=today,
+        end_date=upcoming_end,
     )
-
-    for task in upcoming[:15]:
-
-        task_date_value = task.get(
-            "task_date"
-        )
-
-        deadline_value = task.get(
-            "deadline"
-        )
-
-        # -----------------------------------------------
-        # Determine status
-        # -----------------------------------------------
-
-        deadline_status = ""
-
-        if deadline_value:
-
-            try:
-
-                deadline_obj = datetime.strptime(
-                    str(deadline_value),
-                    "%Y-%m-%d"
-                ).date()
-
-                if deadline_obj < today:
-
-                    deadline_status = "⚠️ OVERDUE"
-
-                elif deadline_obj == today:
-
-                    deadline_status = "🔴 DUE TODAY"
-
-                elif deadline_obj == today + timedelta(days=1):
-
-                    deadline_status = "🟠 DUE TOMORROW"
-
-                else:
-
-                    deadline_status = (
-                        f"📅 Due "
-                        f"{format_date(deadline_value)}"
-                    )
-
-            except Exception:
-
-                deadline_status = ""
-
-        else:
-
-            deadline_status = (
-                f"📅 Task date "
-                f"{format_date(task_date_value)}"
-            )
-
-        client_text = ""
-
-        if task.get("client_name"):
-
-            client_text = (
-                f" · 👤 {task['client_name']}"
-            )
-
-        with st.container(border=True):
-
-            c1, c2 = st.columns(
-                [0.06, 0.94]
-            )
-
-            c1.write("📌")
-
-            c2.markdown(
-                f"**{task.get('title')}**"
-                f"{client_text}"
-            )
-
-            c2.caption(
-                deadline_status
-            )
-
-            meta1, meta2, meta3 = c2.columns(3)
-
-            meta1.caption(
-                f"📝 {number(task.get('total_words'))} words"
-            )
-
-            meta2.caption(
-                f"💻 "
-                f"{safe_text(task.get('software')) or '—'}"
-            )
-
-            meta3.caption(
-                f"💰 {money(task.get('price'))}"
-            )
 
     if not upcoming:
 
@@ -842,30 +956,106 @@ else:
 
     else:
 
-        for task in upcoming[:10]:
+        st.caption(
+            f"{len(upcoming)} pending task(s) "
+            f"requiring attention from "
+            f"{today.strftime('%d %b')} to "
+            f"{upcoming_end.strftime('%d %b %Y')}."
+        )
+
+        for task in upcoming[:15]:
+
+            task_date_value = task.get("task_date")
+            deadline_value = task.get("deadline")
+
+            task_date_obj = to_date(task_date_value)
+            deadline_obj = to_date(deadline_value)
+
+            # Determine the most useful status message.
+            if deadline_obj:
+
+                if deadline_obj < today:
+
+                    deadline_status = (
+                        f"⚠️ OVERDUE · "
+                        f"{format_date(deadline_obj)}"
+                    )
+
+                elif deadline_obj == today:
+
+                    deadline_status = "🔴 DUE TODAY"
+
+                elif deadline_obj == today + timedelta(days=1):
+
+                    deadline_status = (
+                        f"🟠 DUE TOMORROW · "
+                        f"{format_date(deadline_obj)}"
+                    )
+
+                else:
+
+                    deadline_status = (
+                        f"📅 Due · "
+                        f"{format_date(deadline_obj)}"
+                    )
+
+            elif task_date_obj:
+
+                if task_date_obj == today:
+
+                    deadline_status = "📌 TASK TODAY"
+
+                elif task_date_obj == today + timedelta(days=1):
+
+                    deadline_status = "🟠 TASK TOMORROW"
+
+                else:
+
+                    deadline_status = (
+                        f"📅 Scheduled · "
+                        f"{format_date(task_date_obj)}"
+                    )
+
+            else:
+
+                deadline_status = ""
 
             client_text = ""
 
             if task.get("client_name"):
 
                 client_text = (
-                    f" · {task['client_name']}"
+                    f" · 👤 {task['client_name']}"
                 )
 
-            if is_overdue(task):
+            with st.container(border=True):
 
-                icon = "⚠️"
+                c1, c2 = st.columns([0.06, 0.94])
 
-            else:
+                c1.write("📌")
 
-                icon = "📌"
+                c2.markdown(
+                    f"**{safe_text(task.get('title'))}"
+                    f"{client_text}**"
+                )
 
-            st.write(
-                f"{icon} "
-                f"**{format_date(task.get('task_date'))}** · "
-                f"{task.get('title')}"
-                f"{client_text}"
-            )
+                if deadline_status:
+                    c2.caption(deadline_status)
+
+                meta1, meta2, meta3 = c2.columns(3)
+
+                meta1.caption(
+                    f"📝 {number(task.get('total_words'))} words"
+                )
+
+                meta2.caption(
+                    f"💻 "
+                    f"{safe_text(task.get('software')) or '—'}"
+                )
+
+                meta3.caption(
+                    f"💰 {money(task.get('price'))}"
+                )
 
 
 # ============================================================
@@ -881,8 +1071,8 @@ elif page == "📅 Tasks":
 
     st.markdown(
         '<div class="app-subtitle">'
-        'View and manage tasks by date.'
-        '</div>',
+        "View and manage tasks by date."
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -891,12 +1081,23 @@ elif page == "📅 Tasks":
         value=date.today(),
     )
 
-    tasks = get_tasks_by_date(
-        selected_date.isoformat()
+    # IMPORTANT:
+    # Do NOT use get_tasks_by_date() here because that function
+    # normally filters only by task_date.
+    #
+    # We instead use the active-period logic so a task with:
+    # Task Date = 24 Aug
+    # Deadline = 25 Aug
+    #
+    # appears on BOTH 24 Aug and 25 Aug.
+
+    tasks = get_active_tasks_for_date(
+        selected_date,
+        include_completed=True,
     )
 
     completed_count = sum(
-        task["status"] == "Completed"
+        safe_text(task.get("status")) == "Completed"
         for task in tasks
     )
 
@@ -945,421 +1146,28 @@ elif page == "📅 Tasks":
     if not tasks:
 
         st.info(
-            "No tasks found for this date."
+            "No tasks active for this date."
         )
 
     else:
 
+        # Sort pending tasks first, then by deadline.
+        tasks.sort(
+            key=lambda task: (
+                safe_text(task.get("status")) == "Completed",
+                to_date(task.get("deadline")) or date.max,
+                safe_text(task.get("title")).lower(),
+            )
+        )
+
         for task in tasks:
 
-            current_status = (
-                task["status"] == "Completed"
+            render_task_card(
+                task,
+                key_prefix="tasks",
             )
 
-            with st.container(border=True):
-
-                top1, top2 = st.columns(
-                    [0.06, 0.94]
-                )
-
-                checked = top1.checkbox(
-                    "",
-                    value=current_status,
-                    key=f"status_{task['id']}",
-                )
-
-                if checked != current_status:
-
-                    toggle_task_status(
-                        task["id"],
-                        checked,
-                    )
-
-                    st.rerun()
-
-                title = safe_text(
-                    task.get("title")
-                )
-
-                if current_status:
-
-                    title = f"~~{title}~~"
-
-                client = safe_text(
-                    task.get("client_name")
-                )
-
-                top2.markdown(
-                    f"### "
-                    f"{priority_icon(task.get('priority'))} "
-                    f"{title}"
-                )
-
-                if client:
-
-                    top2.caption(
-                        f"👤 Client: **{client}**"
-                    )
-
-                # --------------------------------------------
-                # Task information
-                # --------------------------------------------
-
-                i1, i2, i3, i4, i5 = st.columns(5)
-
-                i1.caption(
-                    f"📅 {format_date(task.get('task_date'))}"
-                )
-
-                i2.caption(
-                    f"📝 {number(task.get('total_words'))} words"
-                )
-
-                i3.caption(
-                    f"💻 {safe_text(task.get('software')) or '—'}"
-                )
-
-                i4.caption(
-                    f"💰 {money(task.get('price'))}"
-                )
-
-                i5.caption(
-                    f"🎯 {safe_text(task.get('priority'))}"
-                )
-
-                if task.get("deadline"):
-
-                    if is_overdue(task):
-
-                        st.error(
-                            f"⚠️ Overdue · "
-                            f"{format_date(task.get('deadline'))}"
-                        )
-
-                    else:
-
-                        st.caption(
-                            f"Deadline · "
-                            f"{format_date(task.get('deadline'))}"
-                        )
-
-                if task.get("description"):
-
-                    st.write(
-                        task["description"]
-                    )
-
-                if task.get("notes"):
-
-                    with st.expander("📝 Notes"):
-
-                        st.write(
-                            task["notes"]
-                        )
-
-                # --------------------------------------------
-                # EDIT / DELETE
-                # --------------------------------------------
-
-                with st.expander(
-                    "⚙️ Edit / Delete"
-                ):
-
-                    edited_title = st.text_input(
-                        "Task Title",
-                        value=safe_text(
-                            task.get("title")
-                        ),
-                        key=f"edit_title_{task['id']}",
-                    )
-
-                    edited_client = st.text_input(
-                        "Client Name",
-                        value=safe_text(
-                            task.get("client_name")
-                        ),
-                        key=f"edit_client_{task['id']}",
-                    )
-
-                    e1, e2 = st.columns(2)
-
-                    with e1:
-
-                        edited_date = st.date_input(
-                            "Task Date",
-                            value=datetime.strptime(
-                                task["task_date"],
-                                "%Y-%m-%d"
-                            ).date(),
-                            key=f"edit_date_{task['id']}",
-                        )
-
-                        deadline_value = None
-
-                        if task.get("deadline"):
-
-                            try:
-
-                                deadline_value = datetime.strptime(
-                                    task["deadline"],
-                                    "%Y-%m-%d"
-                                ).date()
-
-                            except Exception:
-
-                                deadline_value = None
-
-                        edited_deadline = st.date_input(
-                            "Deadline",
-                            value=deadline_value,
-                            key=f"edit_deadline_{task['id']}",
-                        )
-
-                        edited_status = st.selectbox(
-                            "Status",
-                            [
-                                "Pending",
-                                "Completed",
-                            ],
-                            index=(
-                                1
-                                if current_status
-                                else 0
-                            ),
-                            key=f"edit_status_{task['id']}",
-                        )
-
-                    with e2:
-
-                        edited_category = st.selectbox(
-                            "Category",
-                            [
-                                "Dissertation",
-                                "Assignment",
-                                "Data Analysis",
-                                "Programming",
-                                "Machine Learning",
-                                "Research",
-                                "Report",
-                                "Presentation",
-                                "Other",
-                            ],
-                            index=(
-                                [
-                                    "Dissertation",
-                                    "Assignment",
-                                    "Data Analysis",
-                                    "Programming",
-                                    "Machine Learning",
-                                    "Research",
-                                    "Report",
-                                    "Presentation",
-                                    "Other",
-                                ].index(
-                                    task.get(
-                                        "category",
-                                        "Other"
-                                    )
-                                )
-                                if task.get(
-                                    "category",
-                                    "Other"
-                                ) in [
-                                    "Dissertation",
-                                    "Assignment",
-                                    "Data Analysis",
-                                    "Programming",
-                                    "Machine Learning",
-                                    "Research",
-                                    "Report",
-                                    "Presentation",
-                                    "Other",
-                                ]
-                                else 8
-                            ),
-                            key=f"edit_category_{task['id']}",
-                        )
-
-                        edited_priority = st.selectbox(
-                            "Priority",
-                            [
-                                "Low",
-                                "Medium",
-                                "High",
-                                "Urgent",
-                            ],
-                            index=(
-                                [
-                                    "Low",
-                                    "Medium",
-                                    "High",
-                                    "Urgent",
-                                ].index(
-                                    task.get(
-                                        "priority",
-                                        "Medium"
-                                    )
-                                )
-                                if task.get(
-                                    "priority",
-                                    "Medium"
-                                ) in [
-                                    "Low",
-                                    "Medium",
-                                    "High",
-                                    "Urgent",
-                                ]
-                                else 1
-                            ),
-                            key=f"edit_priority_{task['id']}",
-                        )
-
-                        edited_words = st.number_input(
-                            "Total Words",
-                            min_value=0,
-                            value=int(
-                                task.get("total_words")
-                                or 0
-                            ),
-                            step=100,
-                            key=f"edit_words_{task['id']}",
-                        )
-
-                        edited_price = st.number_input(
-                            "Price (₹)",
-                            min_value=0.0,
-                            value=float(
-                                task.get("price")
-                                or 0
-                            ),
-                            step=5.0,
-                            key=f"edit_price_{task['id']}",
-                        )
-
-                    edited_software = st.text_input(
-                        "Software / Work Details",
-                        value=safe_text(
-                            task.get("software")
-                        ),
-                        key=f"edit_software_{task['id']}",
-                    )
-
-                    edited_description = st.text_area(
-                        "Description",
-                        value=safe_text(
-                            task.get("description")
-                        ),
-                        key=f"edit_description_{task['id']}",
-                    )
-
-                    edited_notes = st.text_area(
-                        "Notes",
-                        value=safe_text(
-                            task.get("notes")
-                        ),
-                        key=f"edit_notes_{task['id']}",
-                    )
-
-                    b1, b2 = st.columns(2)
-
-                    with b1:
-
-                        if st.button(
-                            "💾 Save Changes",
-                            key=f"save_{task['id']}",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-
-                            update_task(
-                                task_id=task["id"],
-                                title=edited_title.strip(),
-                                client_name=edited_client.strip(),
-                                task_date=edited_date.isoformat(),
-                                deadline=(
-                                    edited_deadline.isoformat()
-                                    if edited_deadline
-                                    else None
-                                ),
-                                description=edited_description.strip(),
-                                status=edited_status,
-                                total_words=int(
-                                    edited_words
-                                ),
-                                software=edited_software.strip(),
-                                category=edited_category,
-                                priority=edited_priority,
-                                price=float(
-                                    edited_price
-                                ),
-                                notes=edited_notes.strip(),
-                            )
-
-                            st.success(
-                                "Task updated successfully."
-                            )
-
-                            st.rerun()
-
-                    with b2:
-
-                        if st.button(
-                            "🗑️ Delete Task",
-                            key=f"delete_{task['id']}",
-                            use_container_width=True,
-                        ):
-
-                            st.session_state[
-                                f"confirm_delete_{task['id']}"
-                            ] = True
-
-                    if st.session_state.get(
-                        f"confirm_delete_{task['id']}",
-                        False,
-                    ):
-
-                        st.warning(
-                            "Are you sure you want to delete this task?"
-                        )
-
-                        d1, d2 = st.columns(2)
-
-                        with d1:
-
-                            if st.button(
-                                "Yes, delete",
-                                key=f"confirm_{task['id']}",
-                                type="primary",
-                                use_container_width=True,
-                            ):
-
-                                delete_task(
-                                    task["id"]
-                                )
-
-                                st.session_state[
-                                    f"confirm_delete_{task['id']}"
-                                ] = False
-
-                                st.success(
-                                    "Task deleted."
-                                )
-
-                                st.rerun()
-
-                        with d2:
-
-                            if st.button(
-                                "Cancel",
-                                key=f"cancel_{task['id']}",
-                                use_container_width=True,
-                            ):
-
-                                st.session_state[
-                                    f"confirm_delete_{task['id']}"
-                                ] = False
-
-                                st.rerun()
+            render_edit_delete(task)
 
 
 # ============================================================
@@ -1375,38 +1183,36 @@ elif page == "➕ Add Task":
 
     st.markdown(
         '<div class="app-subtitle">'
-        'Add a new task to your workload.'
-        '</div>',
+        "Add a new task to your workload."
+        "</div>",
         unsafe_allow_html=True,
     )
 
     with st.form("new_task_form"):
 
-        # ----------------------------------------------------
-        # BASIC INFORMATION
-        # ----------------------------------------------------
-
         st.subheader("Basic Information")
 
         title = st.text_input(
             "Task Title *",
-            placeholder="e.g. Complete dissertation methodology",
+            placeholder=(
+                "e.g. Complete dissertation methodology"
+            ),
         )
 
         client_name = st.text_input(
             "Client Name",
-            placeholder="e.g. ABC Ltd / John / University",
+            placeholder=(
+                "e.g. ABC Ltd / John / University"
+            ),
         )
 
         description = st.text_area(
             "Task Description",
-            placeholder="Briefly describe what needs to be done...",
+            placeholder=(
+                "Briefly describe what needs to be done..."
+            ),
             height=100,
         )
-
-        # ----------------------------------------------------
-        # DATE / CATEGORY
-        # ----------------------------------------------------
 
         st.subheader("Planning")
 
@@ -1430,33 +1236,14 @@ elif page == "➕ Add Task":
 
             category = st.selectbox(
                 "Category",
-                [
-                    "Dissertation",
-                    "Assignment",
-                    "Data Analysis",
-                    "Programming",
-                    "Machine Learning",
-                    "Research",
-                    "Report",
-                    "Presentation",
-                    "Other",
-                ],
+                CATEGORIES,
             )
 
         priority = st.select_slider(
             "Priority",
-            options=[
-                "Low",
-                "Medium",
-                "High",
-                "Urgent",
-            ],
+            options=PRIORITIES,
             value="Medium",
         )
-
-        # ----------------------------------------------------
-        # WORK DETAILS
-        # ----------------------------------------------------
 
         st.subheader("Work Details")
 
@@ -1475,7 +1262,9 @@ elif page == "➕ Add Task":
 
             software = st.text_input(
                 "Software / Tools",
-                placeholder="e.g. Python, Excel, SPSS",
+                placeholder=(
+                    "e.g. Python, Excel, SPSS"
+                ),
             )
 
         with c3:
@@ -1489,13 +1278,12 @@ elif page == "➕ Add Task":
 
         notes = st.text_area(
             "Notes",
-            placeholder="Additional information, instructions or reminders...",
+            placeholder=(
+                "Additional information, instructions "
+                "or reminders..."
+            ),
             height=100,
         )
-
-        # ----------------------------------------------------
-        # SUBMIT
-        # ----------------------------------------------------
 
         st.write("")
 
@@ -1511,6 +1299,15 @@ elif page == "➕ Add Task":
 
                 st.error(
                     "Please enter a task title."
+                )
+
+            elif (
+                deadline is not None
+                and deadline < task_date
+            ):
+
+                st.error(
+                    "Deadline cannot be earlier than the Task Date."
                 )
 
             else:
@@ -1555,8 +1352,8 @@ elif page == "📊 Reports":
 
     st.markdown(
         '<div class="app-subtitle">'
-        'Analyse your workload, words and earnings.'
-        '</div>',
+        "Analyse your workload, words and earnings."
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -1576,12 +1373,11 @@ elif page == "📊 Reports":
         month = st.selectbox(
             "Month",
             range(1, 13),
-            format_func=lambda x:
-                datetime(
-                    2000,
-                    x,
-                    1,
-                ).strftime("%B"),
+            format_func=lambda x: datetime(
+                2000,
+                x,
+                1,
+            ).strftime("%B"),
             index=date.today().month - 1,
         )
 
@@ -1600,6 +1396,17 @@ elif page == "📊 Reports":
 
         df = pd.DataFrame(tasks)
 
+        # Make sure numeric columns are numeric.
+        df["total_words"] = pd.to_numeric(
+            df["total_words"],
+            errors="coerce",
+        ).fillna(0)
+
+        df["price"] = pd.to_numeric(
+            df["price"],
+            errors="coerce",
+        ).fillna(0)
+
         completed_mask = (
             df["status"] == "Completed"
         )
@@ -1615,44 +1422,32 @@ elif page == "📊 Reports":
         )
 
         total_words = int(
-            df["total_words"]
-            .fillna(0)
-            .sum()
+            df["total_words"].sum()
         )
 
         completed_words = int(
             df.loc[
                 completed_mask,
-                "total_words"
-            ]
-            .fillna(0)
-            .sum()
+                "total_words",
+            ].sum()
         )
 
         total_value = float(
-            df["price"]
-            .fillna(0)
-            .sum()
+            df["price"].sum()
         )
 
         completed_value = float(
             df.loc[
                 completed_mask,
-                "price"
-            ]
-            .fillna(0)
-            .sum()
+                "price",
+            ].sum()
         )
 
         completion_rate = (
-            completed_tasks
-            / total_tasks
-            * 100
+            completed_tasks / total_tasks * 100
+            if total_tasks > 0
+            else 0
         )
-
-        # ----------------------------------------------------
-        # MAIN MONTHLY METRICS
-        # ----------------------------------------------------
 
         c1, c2, c3, c4 = st.columns(4)
 
@@ -1707,48 +1502,51 @@ elif page == "📊 Reports":
         # ----------------------------------------------------
 
         df["task_date"] = pd.to_datetime(
-            df["task_date"]
+            df["task_date"],
+            errors="coerce",
         )
 
         daily_tasks = (
-            df.groupby("task_date")
+            df.dropna(subset=["task_date"])
+            .groupby("task_date")
             .size()
             .rename("Tasks")
         )
 
         st.subheader("Tasks per Day")
 
-        st.bar_chart(
-            daily_tasks
-        )
+        if not daily_tasks.empty:
+            st.bar_chart(daily_tasks)
+        else:
+            st.info("No daily task data available.")
 
         daily_words = (
-            df.groupby("task_date")[
-                "total_words"
-            ]
+            df.dropna(subset=["task_date"])
+            .groupby("task_date")["total_words"]
             .sum()
             .rename("Words")
         )
 
         st.subheader("Words per Day")
 
-        st.line_chart(
-            daily_words
-        )
+        if not daily_words.empty:
+            st.line_chart(daily_words)
+        else:
+            st.info("No word data available.")
 
         daily_value = (
-            df.groupby("task_date")[
-                "price"
-            ]
+            df.dropna(subset=["task_date"])
+            .groupby("task_date")["price"]
             .sum()
             .rename("Value")
         )
 
         st.subheader("Value per Day")
 
-        st.line_chart(
-            daily_value
-        )
+        if not daily_value.empty:
+            st.line_chart(daily_value)
+        else:
+            st.info("No value data available.")
 
         # ----------------------------------------------------
         # CLIENT ANALYSIS
@@ -1758,9 +1556,9 @@ elif page == "📊 Reports":
 
         client_summary = (
             df.assign(
-                client_name=df[
-                    "client_name"
-                ].fillna("No Client")
+                client_name=df["client_name"]
+                .fillna("")
+                .replace("", "No Client")
             )
             .groupby("client_name")
             .agg(
@@ -1788,7 +1586,11 @@ elif page == "📊 Reports":
         st.subheader("Category Summary")
 
         category_summary = (
-            df.groupby("category")
+            df.assign(
+                category=df["category"]
+                .fillna("Other")
+            )
+            .groupby("category")
             .agg(
                 Tasks=("id", "count"),
                 Words=("total_words", "sum"),
@@ -1821,8 +1623,8 @@ elif page == "🔍 Search":
 
     st.markdown(
         '<div class="app-subtitle">'
-        'Find tasks using client, title, software or other filters.'
-        '</div>',
+        "Find tasks using client, title, software or other filters."
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -1830,9 +1632,7 @@ elif page == "🔍 Search":
 
     if not tasks:
 
-        st.info(
-            "No tasks available."
-        )
+        st.info("No tasks available.")
 
     else:
 
@@ -1861,17 +1661,15 @@ elif page == "🔍 Search":
 
         with c2:
 
-            priority_options = [
-                "All",
-                "Low",
-                "Medium",
-                "High",
-                "Urgent",
-            ]
-
             priority_filter = st.selectbox(
                 "Priority",
-                priority_options,
+                [
+                    "All",
+                    "Low",
+                    "Medium",
+                    "High",
+                    "Urgent",
+                ],
             )
 
         with c3:
@@ -1903,10 +1701,6 @@ elif page == "🔍 Search":
 
         filtered = df.copy()
 
-        # ----------------------------------------------------
-        # TEXT SEARCH
-        # ----------------------------------------------------
-
         if search.strip():
 
             query = search.lower().strip()
@@ -1918,6 +1712,7 @@ elif page == "🔍 Search":
                 "software",
                 "notes",
                 "category",
+                "priority",
             ]
 
             mask = pd.Series(
@@ -1926,6 +1721,9 @@ elif page == "🔍 Search":
             )
 
             for column in searchable_columns:
+
+                if column not in filtered.columns:
+                    continue
 
                 mask = (
                     mask
@@ -1937,34 +1735,28 @@ elif page == "🔍 Search":
                     .str.contains(
                         query,
                         na=False,
+                        regex=False,
                     )
                 )
 
             filtered = filtered[mask]
 
-        # ----------------------------------------------------
-        # FILTERS
-        # ----------------------------------------------------
-
         if status_filter != "All":
 
             filtered = filtered[
-                filtered["status"]
-                == status_filter
+                filtered["status"] == status_filter
             ]
 
         if priority_filter != "All":
 
             filtered = filtered[
-                filtered["priority"]
-                == priority_filter
+                filtered["priority"] == priority_filter
             ]
 
         if category_filter != "All":
 
             filtered = filtered[
-                filtered["category"]
-                == category_filter
+                filtered["category"] == category_filter
             ]
 
         if client_filter != "All":
@@ -2005,21 +1797,30 @@ elif page == "🔍 Search":
                 "price",
             ]
 
+            display_columns = [
+                column
+                for column in display_columns
+                if column in filtered.columns
+            ]
+
             display_df = filtered[
                 display_columns
             ].copy()
 
             display_df.columns = [
-                "Task",
-                "Client",
-                "Date",
-                "Deadline",
-                "Status",
-                "Words",
-                "Software",
-                "Category",
-                "Priority",
-                "Price",
+                {
+                    "title": "Task",
+                    "client_name": "Client",
+                    "task_date": "Date",
+                    "deadline": "Deadline",
+                    "status": "Status",
+                    "total_words": "Words",
+                    "software": "Software",
+                    "category": "Category",
+                    "priority": "Priority",
+                    "price": "Price",
+                }.get(column, column)
+                for column in display_df.columns
             ]
 
             st.dataframe(
@@ -2059,8 +1860,8 @@ elif page == "💾 Data":
 
     st.markdown(
         '<div class="app-subtitle">'
-        'Export and review your stored task data.'
-        '</div>',
+        "Export and review your stored task data."
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -2068,9 +1869,7 @@ elif page == "💾 Data":
 
     if not tasks:
 
-        st.info(
-            "No data available."
-        )
+        st.info("No data available.")
 
     else:
 
@@ -2086,7 +1885,10 @@ elif page == "💾 Data":
         c2.metric(
             "Words",
             number(
-                df["total_words"]
+                pd.to_numeric(
+                    df["total_words"],
+                    errors="coerce",
+                )
                 .fillna(0)
                 .sum()
             ),
@@ -2095,7 +1897,10 @@ elif page == "💾 Data":
         c3.metric(
             "Total Value",
             money(
-                df["price"]
+                pd.to_numeric(
+                    df["price"],
+                    errors="coerce",
+                )
                 .fillna(0)
                 .sum()
             ),
@@ -2120,14 +1925,13 @@ elif page == "💾 Data":
 
         st.divider()
 
-        st.subheader(
-            "Stored Data"
-        )
+        st.subheader("Stored Data")
 
         display_columns = [
             "title",
             "client_name",
             "task_date",
+            "deadline",
             "status",
             "total_words",
             "software",
@@ -2136,20 +1940,30 @@ elif page == "💾 Data":
             "price",
         ]
 
+        display_columns = [
+            column
+            for column in display_columns
+            if column in df.columns
+        ]
+
         display_df = df[
             display_columns
         ].copy()
 
         display_df.columns = [
-            "Task",
-            "Client",
-            "Date",
-            "Status",
-            "Words",
-            "Software",
-            "Category",
-            "Priority",
-            "Price",
+            {
+                "title": "Task",
+                "client_name": "Client",
+                "task_date": "Date",
+                "deadline": "Deadline",
+                "status": "Status",
+                "total_words": "Words",
+                "software": "Software",
+                "category": "Category",
+                "priority": "Priority",
+                "price": "Price",
+            }.get(column, column)
+            for column in display_df.columns
         ]
 
         st.dataframe(
