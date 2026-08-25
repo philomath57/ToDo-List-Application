@@ -296,3 +296,120 @@ def get_statistics():
         "total_price": total_price,
         "completed_price": completed_price,
     }
+
+def get_pending_dashboard_tasks(
+    start_date=None,
+    end_date=None
+):
+    """
+    Returns pending tasks that are relevant to the dashboard.
+
+    A pending task is included when:
+
+    - It is scheduled within the selected period, OR
+    - Its deadline falls within the selected period, OR
+    - It was scheduled earlier but its deadline has not passed yet.
+
+    Tasks without deadlines remain visible if their task date
+    is within the selected period.
+    """
+
+    if start_date is None:
+        start_date = date.today()
+
+    if end_date is None:
+        end_date = (
+            start_date
+            + timedelta(days=7)
+        )
+
+    tasks = get_all_tasks()
+
+    relevant_tasks = []
+
+    for task in tasks:
+
+        # Only pending tasks
+        if task.get("status") == "Completed":
+            continue
+
+        task_date_value = task.get("task_date")
+        deadline_value = task.get("deadline")
+
+        # ----------------------------------------------------
+        # Convert dates
+        # ----------------------------------------------------
+
+        try:
+
+            task_date_obj = (
+                datetime.strptime(
+                    str(task_date_value),
+                    "%Y-%m-%d"
+                ).date()
+                if task_date_value
+                else None
+            )
+
+        except Exception:
+
+            task_date_obj = None
+
+        try:
+
+            deadline_obj = (
+                datetime.strptime(
+                    str(deadline_value),
+                    "%Y-%m-%d"
+                ).date()
+                if deadline_value
+                else None
+            )
+
+        except Exception:
+
+            deadline_obj = None
+
+        # ----------------------------------------------------
+        # Determine relevance
+        # ----------------------------------------------------
+
+        relevant = False
+
+        # Future/current scheduled task
+        if task_date_obj:
+
+            if start_date <= task_date_obj <= end_date:
+                relevant = True
+
+        # Deadline falls within period
+        if deadline_obj:
+
+            if start_date <= deadline_obj <= end_date:
+                relevant = True
+
+        # Previously scheduled task that is still pending
+        # and deadline has not passed
+        if task_date_obj and task_date_obj < start_date:
+
+            if deadline_obj:
+
+                if deadline_obj >= start_date:
+                    relevant = True
+
+        if relevant:
+
+            relevant_tasks.append(task)
+
+    # --------------------------------------------------------
+    # Sort by deadline first, then task date
+    # --------------------------------------------------------
+
+    relevant_tasks.sort(
+        key=lambda task: (
+            task.get("deadline") or "9999-12-31",
+            task.get("task_date") or "9999-12-31",
+        )
+    )
+
+    return relevant_tasks
