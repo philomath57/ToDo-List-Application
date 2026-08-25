@@ -377,9 +377,226 @@ if page == "🏠 Home":
         f"Today's Tasks · {date.today().strftime('%d %B %Y')}"
     )
 
-    today_tasks = get_tasks_by_date(
-        date.today().isoformat()
+    today = date.today()
+
+st.subheader(
+    f"Today's Tasks · {today.strftime('%d %B %Y')}"
+)
+
+all_tasks = get_all_tasks()
+
+active_today_tasks = []
+
+for task in all_tasks:
+
+    # Completed tasks should not appear in the
+    # pending/current task section.
+    if task.get("status") == "Completed":
+        continue
+
+    task_date_value = task.get("task_date")
+    deadline_value = task.get("deadline")
+
+    try:
+        task_date_obj = (
+            datetime.strptime(
+                str(task_date_value),
+                "%Y-%m-%d"
+            ).date()
+            if task_date_value
+            else None
+        )
+    except Exception:
+        task_date_obj = None
+
+    try:
+        deadline_obj = (
+            datetime.strptime(
+                str(deadline_value),
+                "%Y-%m-%d"
+            ).date()
+            if deadline_value
+            else None
+        )
+    except Exception:
+        deadline_obj = None
+
+    show_task = False
+
+    # ----------------------------------------------------
+    # Task scheduled for today
+    # ----------------------------------------------------
+
+    if task_date_obj == today:
+        show_task = True
+
+    # ----------------------------------------------------
+    # Task was scheduled earlier but is still within
+    # its deadline
+    # ----------------------------------------------------
+
+    elif (
+        task_date_obj
+        and task_date_obj < today
+        and deadline_obj
+        and deadline_obj >= today
+    ):
+        show_task = True
+
+    # ----------------------------------------------------
+    # Task deadline is today
+    # ----------------------------------------------------
+
+    elif deadline_obj == today:
+        show_task = True
+
+    if show_task:
+        active_today_tasks.append(task)
+
+
+if not active_today_tasks:
+
+    st.info(
+        "No pending tasks for today."
     )
+
+    if st.button(
+        "➕ Add a task for today",
+        type="primary",
+    ):
+
+        st.info(
+            "Use the 'Add Task' section from the sidebar."
+        )
+
+else:
+
+    completed_count = sum(
+        task.get("status") == "Completed"
+        for task in active_today_tasks
+    )
+
+    pending_count = (
+        len(active_today_tasks)
+        - completed_count
+    )
+
+    st.caption(
+        f"{len(active_today_tasks)} active task(s)"
+    )
+
+    for task in active_today_tasks:
+
+        current_status = (
+            task["status"] == "Completed"
+        )
+
+        with st.container(border=True):
+
+            col1, col2 = st.columns(
+                [0.06, 0.94]
+            )
+
+            checked = col1.checkbox(
+                "",
+                value=current_status,
+                key=f"home_status_{task['id']}",
+            )
+
+            if checked != current_status:
+
+                toggle_task_status(
+                    task["id"],
+                    checked,
+                )
+
+                st.rerun()
+
+            title = safe_text(
+                task.get("title")
+            )
+
+            client = safe_text(
+                task.get("client_name")
+            )
+
+            if current_status:
+                title_display = f"~~{title}~~"
+            else:
+                title_display = title
+
+            col2.markdown(
+                f"**{priority_icon(task.get('priority'))} "
+                f"{title_display}**"
+            )
+
+            if client:
+
+                col2.caption(
+                    f"👤 {client}"
+                )
+
+            # ------------------------------------------------
+            # Deadline indicator
+            # ------------------------------------------------
+
+            deadline_value = task.get("deadline")
+
+            if deadline_value:
+
+                try:
+
+                    deadline_date = datetime.strptime(
+                        str(deadline_value),
+                        "%Y-%m-%d"
+                    ).date()
+
+                    if deadline_date < today:
+
+                        col2.error(
+                            f"⚠️ OVERDUE · "
+                            f"{format_date(deadline_value)}"
+                        )
+
+                    elif deadline_date == today:
+
+                        col2.warning(
+                            "⚠️ DEADLINE TODAY"
+                        )
+
+                    else:
+
+                        col2.caption(
+                            f"Deadline · "
+                            f"{format_date(deadline_value)}"
+                        )
+
+                except Exception:
+                    pass
+
+            meta1, meta2, meta3, meta4 = col2.columns(4)
+
+            meta1.caption(
+                f"📝 {number(task.get('total_words'))} words"
+            )
+
+            meta2.caption(
+                f"💻 {safe_text(task.get('software')) or '—'}"
+            )
+
+            meta3.caption(
+                f"💰 {money(task.get('price'))}"
+            )
+
+            meta4.caption(
+                f"📂 {safe_text(task.get('category')) or 'Other'}"
+            )
+
+            if task.get("description"):
+
+                col2.write(
+                    task["description"]
+                )
 
     if not today_tasks:
 
@@ -489,23 +706,133 @@ if page == "🏠 Home":
 
     st.subheader("Upcoming Tasks")
 
-    start_date = date.today().isoformat()
+    # --------------------------------------------------------
+# UPCOMING / OUTSTANDING TASKS
+# --------------------------------------------------------
 
-    end_date = (
-        date.today()
-        + timedelta(days=7)
-    ).isoformat()
+st.subheader(
+    "Upcoming & Outstanding Tasks"
+)
 
-    upcoming = get_tasks_between_dates(
-        start_date,
-        end_date,
+today = date.today()
+
+upcoming_end = (
+    today
+    + timedelta(days=7)
+)
+
+upcoming = get_pending_dashboard_tasks(
+    start_date=today,
+    end_date=upcoming_end,
+)
+
+if not upcoming:
+
+    st.success(
+        "No pending tasks in the next 7 days."
     )
 
-    upcoming = [
-        task
-        for task in upcoming
-        if task.get("status") != "Completed"
-    ]
+else:
+
+    st.caption(
+        f"{len(upcoming)} pending task(s) "
+        f"requiring attention."
+    )
+
+    for task in upcoming[:15]:
+
+        task_date_value = task.get(
+            "task_date"
+        )
+
+        deadline_value = task.get(
+            "deadline"
+        )
+
+        # -----------------------------------------------
+        # Determine status
+        # -----------------------------------------------
+
+        deadline_status = ""
+
+        if deadline_value:
+
+            try:
+
+                deadline_obj = datetime.strptime(
+                    str(deadline_value),
+                    "%Y-%m-%d"
+                ).date()
+
+                if deadline_obj < today:
+
+                    deadline_status = "⚠️ OVERDUE"
+
+                elif deadline_obj == today:
+
+                    deadline_status = "🔴 DUE TODAY"
+
+                elif deadline_obj == today + timedelta(days=1):
+
+                    deadline_status = "🟠 DUE TOMORROW"
+
+                else:
+
+                    deadline_status = (
+                        f"📅 Due "
+                        f"{format_date(deadline_value)}"
+                    )
+
+            except Exception:
+
+                deadline_status = ""
+
+        else:
+
+            deadline_status = (
+                f"📅 Task date "
+                f"{format_date(task_date_value)}"
+            )
+
+        client_text = ""
+
+        if task.get("client_name"):
+
+            client_text = (
+                f" · 👤 {task['client_name']}"
+            )
+
+        with st.container(border=True):
+
+            c1, c2 = st.columns(
+                [0.06, 0.94]
+            )
+
+            c1.write("📌")
+
+            c2.markdown(
+                f"**{task.get('title')}**"
+                f"{client_text}"
+            )
+
+            c2.caption(
+                deadline_status
+            )
+
+            meta1, meta2, meta3 = c2.columns(3)
+
+            meta1.caption(
+                f"📝 {number(task.get('total_words'))} words"
+            )
+
+            meta2.caption(
+                f"💻 "
+                f"{safe_text(task.get('software')) or '—'}"
+            )
+
+            meta3.caption(
+                f"💰 {money(task.get('price'))}"
+            )
 
     if not upcoming:
 
